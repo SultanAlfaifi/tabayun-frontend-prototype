@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AlertTriangle, ArrowLeft, ArrowRight, Bot, Loader2, Send, ShieldCheck, User, X } from "lucide-react";
 import { chatService } from "@/services/chatService";
-import { ChatMessage } from "@/types/chat";
+import { ChatMessage, ChatSource } from "@/types/chat";
 import { BrandMark, StatusBadge } from "@/components/ui/tabayun";
 
 export default function ChatPage() {
@@ -20,7 +20,7 @@ export default function ChatPage() {
       content: isAr
         ? "أهلاً بك في مساعد تباين. اسألني عن أي موقف قانوني داخل السعودية وسأعطيك خلاصة واضحة مع تنبيه عند الحاجة."
         : "Welcome to Tabayun Assistant. Ask about any legal situation in Saudi Arabia and I will give a clear summary with warnings when needed.",
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      timestamp: "",
     },
   ]);
   const [inputText, setInputText] = useState("");
@@ -46,10 +46,25 @@ export default function ChatPage() {
     setInputText("");
     setLoading(true);
 
+    const greetingReply = getGreetingReply(currentInput, isAr);
+    if (greetingReply) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "bot",
+          content: greetingReply,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        },
+      ]);
+      setLoading(false);
+      return;
+    }
+
     try {
-      const response = await chatService.queryAI(currentInput);
+      const response = await chatService.queryAI(currentInput, locale);
       let finalContent = response.response;
-      let finalSource = response.source;
+      let finalSource = response.source || undefined;
+      const finalSources = response.sources || [];
 
       if (typeof finalContent === "string" && finalContent.trim().startsWith("{")) {
         try {
@@ -71,15 +86,17 @@ export default function ChatPage() {
           role: "bot",
           content: finalContent,
           source: finalSource,
+          sources: finalSources,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         },
       ]);
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
       setMessages((prev) => [
         ...prev,
         {
           role: "bot",
-          content: isAr ? "عذراً، حدث خطأ أثناء معالجة طلبك. حاول بصياغة أقصر أو أعد المحاولة." : "Sorry, something went wrong. Try a shorter question or retry.",
+          content: getChatErrorMessage(message, isAr),
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         },
       ]);
@@ -223,6 +240,46 @@ export default function ChatPage() {
   );
 }
 
+function getGreetingReply(input: string, isAr: boolean): string | null {
+  const normalized = input.trim().toLowerCase().replace(/[.!؟?،,]/g, "");
+  const arabicGreetings = new Set(["اهلا", "أهلا", "هلا", "مرحبا", "السلام عليكم", "سلام"]);
+  const englishGreetings = new Set(["hi", "hello", "hey", "salam"]);
+
+  if (arabicGreetings.has(normalized) || englishGreetings.has(normalized)) {
+    return isAr
+      ? "ياهلا، حيّاك الله. اكتب لي الموقف القانوني أو سؤالك، وبعطيك خلاصة واضحة مع مقارنة بلدك إذا كانت متوفرة."
+      : "Hi, welcome. Send me the legal situation or question, and I will give you a clear summary with a country comparison when available.";
+  }
+
+  return null;
+}
+
+function getChatErrorMessage(message: string, isAr: boolean): string {
+  const lower = message.toLowerCase();
+
+  if (lower.includes("not authenticated") || lower.includes("unauthorized") || lower.includes("could not validate credentials")) {
+    return isAr
+      ? "يبدو أن جلسة تسجيل الدخول انتهت. سجل الدخول مرة ثانية ثم ارجع للمحادثة."
+      : "Your login session seems to have expired. Sign in again, then return to the chat.";
+  }
+
+  if (lower.includes("failed to fetch") || lower.includes("network")) {
+    return isAr
+      ? "الباكند غير متصل الآن. تأكد أن الخادم يعمل ثم أعد المحاولة."
+      : "The backend is not connected right now. Make sure the server is running, then try again.";
+  }
+
+  if (lower.includes("chat service error")) {
+    return isAr
+      ? "الخدمة واجهت خللًا مؤقتًا في الشات. جرّب بعد لحظات، وإذا استمر الخطأ أعد تسجيل الدخول."
+      : "The chat service hit a temporary issue. Try again shortly, and if it continues, sign in again.";
+  }
+
+  return isAr
+    ? "صار خلل مؤقت في معالجة الطلب. جرّب مرة ثانية، وإذا استمر الخطأ أعد تسجيل الدخول."
+    : "A temporary issue occurred while processing your request. Try again, and if it continues, sign in again.";
+}
+
 function MessageBubble({ message, isAr }: { message: ChatMessage; isAr: boolean }) {
   const isUser = message.role === "user";
 
@@ -251,11 +308,45 @@ function MessageBubble({ message, isAr }: { message: ChatMessage; isAr: boolean 
                 {isAr ? "المصدر: " : "Source: "} {message.source}
               </div>
             )}
+            {message.sources && message.sources.length > 0 && (
+              <SourceList sources={message.sources} isAr={isAr} />
+            )}
           </div>
           <div className={`text-[11px] font-bold text-tabayun-coffee/35 ${isUser ? "text-end" : "text-start"}`}>
             {message.timestamp}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SourceList({ sources, isAr }: { sources: ChatSource[]; isAr: boolean }) {
+  return (
+    <div className="mt-4 border-t border-tabayun-sand pt-3 text-xs font-black text-tabayun-clay">
+      <div className="mb-2">{isAr ? "المصادر:" : "Sources:"}</div>
+      <div className="space-y-2">
+        {sources.slice(0, 3).map((source) => (
+          <div key={source.id} className="leading-relaxed">
+            {source.url ? (
+              <a
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+                className="underline decoration-tabayun-gold/70 underline-offset-4 transition hover:text-tabayun-coffee"
+              >
+                {source.title}
+              </a>
+            ) : (
+              <span>{source.title}</span>
+            )}
+            {typeof source.similarity === "number" && (
+              <span className="ms-2 text-tabayun-coffee/40">
+                {Math.round(source.similarity)}%
+              </span>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
